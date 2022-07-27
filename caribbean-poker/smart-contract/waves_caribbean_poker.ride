@@ -1,0 +1,847 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let gameMasterPublicKey = base58'' # gameMasterPublicKey
+let RSAPUBLIC = fromBase64String("base64:RSAPUBLIC")
+
+
+# Global variables
+let setupGamesCounterLabel = "G_SETUPGAMESCOUNTER"
+let usedGamesCounterLabel = "G_USEDGAMESCOUNTER"
+let dealerQueueLabel = "G_DEALERQUEUE"
+let gameMaxBetLabel = "G_MAXBET"
+
+func gamesMaxBet() = getInteger(this, gameMaxBetLabel)
+func gamesSetupGetCounter() = getInteger(this, setupGamesCounterLabel)
+func gamesUsedGetCounter() = getInteger(this, usedGamesCounterLabel)
+func getDealerQueue() = getString(this, dealerQueueLabel)
+
+# Game variables, this is actually the signature AND the encrypted value seperate by _
+func getGameCardsSignatureLabel(gameNumber: Int, card: Int) = ("G_" + toString(gameNumber) + "_CARDSIGNATURE_" + toString(card))
+func getGameCardsLabel(gameNumber: Int, card: Int) = ("G_" + toString(gameNumber) + "_CARD_" + toString(card))
+func getGameSortedHandLabel(gameNumber: Int, who: String) = ("G_" + toString(gameNumber) + "_" + who + "_SORTEDHAND")
+func getGameHandScoreLabel(gameNumber: Int, who: String) = ("G_" + toString(gameNumber) + "_" + who + "_SCORE")
+# player or dealer
+func getGameAnteAmountLabel(gameNumber: Int) = ("G_" + toString(gameNumber) + "_ANTE")
+func getGamePlayerLabel(gameNumber: Int) = ("G_" + toString(gameNumber) + "_PLAYER")
+func getGamePayoutLabel(gameNumber: Int) = ("G_" + toString(gameNumber) + "_PAYOUT")
+#States - 
+#0-Not started
+#1-In-progress (waiting on reveal)
+#2-In-progress (waiting on player choice)
+#3-Waiting on game master reveal
+#4-finished with payout
+#5-dealer fault refunded
+#6-player folded
+#7-player decision expired
+#8-dealer fold
+func getGameStateLabel(gameNumber: Int) = ("G_" + toString(gameNumber) + "_STATE")
+func getGameShuffelOffesetLabel(gameNumber: Int) = ("G_" + toString(gameNumber) + "_OFFSET")
+
+# The sets are like this
+# 0-4 cards
+# 1-1 card
+# 2-1 card
+# 3-4 cards
+func getGameCardsSignature(gameNumber: Int, card: Int) = getString(this, getGameCardsSignatureLabel(gameNumber, card))
+# The cards that are sorted
+func getGameSortedHandCards(gameNumber: Int, who: String) = getString(this, getGameSortedHandLabel(gameNumber, who))
+func getGameHandScore(gameNumber: Int, who: String) = getInteger(this, getGameHandScoreLabel(gameNumber, who))
+func getGameCards(gameNumber: Int, card: Int) = getString(this, getGameCardsLabel(gameNumber, card))
+func getGamePlayer(gameNumber: Int) = getString(this, getGamePlayerLabel(gameNumber))
+func getGameState(gameNumber: Int) = getInteger(this, getGameStateLabel(gameNumber))
+func getGameAnteAmount(gameNumber: Int) =  getInteger(this, getGameAnteAmountLabel(gameNumber))
+func getGameShuffelOffeset(gameNumber: Int) =  getInteger(this, getGameShuffelOffesetLabel(gameNumber))
+func getGamePayout(gameNumber: Int) =  getInteger(this, getGamePayoutLabel(gameNumber))
+
+#Player variable
+func getPlayerCurrentGameLabel(address: String) = ("P_" + address + "_CURRENTGAME")
+func getPlayerCurrentGame(address: String) = getInteger(this, getPlayerCurrentGameLabel(address))
+
+
+func verifyCard(card: String, gameNumber: Int, cardNumber: Int) = {
+  rsaVerify_16Kb(SHA256, card.toBytes(), fromBase64String(value(getGameCardsSignature(gameNumber, cardNumber)).split(" ").getElement(0)), RSAPUBLIC)
+}
+
+
+# Player specific labels
+func checkPermission(callerPublicKey:ByteVector) = callerPublicKey != gameMasterPublicKey
+
+func createGameMetadata(address: String, ante: Int) = {
+  let gameToReserve = value(gamesUsedGetCounter()) + 1 
+  let dealerQueue = value(getDealerQueue())
+  [
+    IntegerEntry(usedGamesCounterLabel, gameToReserve),
+    IntegerEntry(getPlayerCurrentGameLabel(address), gameToReserve),
+    IntegerEntry(getGameStateLabel(gameToReserve), 1),
+    IntegerEntry(getGameAnteAmountLabel(gameToReserve), ante),
+    StringEntry(dealerQueueLabel, value(getDealerQueue()) + "," + gameToReserve.toString()),
+    StringEntry(getGamePlayerLabel(gameToReserve), address)
+  ]
+}
+
+func getGameSetup(gameNumber: Int, randomizer: Int, cards0: String, cards1: String, cards2: String, cards3: String) = 
+{
+  [
+    IntegerEntry(setupGamesCounterLabel, gameNumber),
+    IntegerEntry(getGameStateLabel(gameNumber) , 0),
+    IntegerEntry(getGameShuffelOffesetLabel(gameNumber), randomizer),
+    StringEntry(getGameCardsSignatureLabel(gameNumber, 0), cards0),
+    StringEntry(getGameCardsSignatureLabel(gameNumber, 1), cards1),
+    StringEntry(getGameCardsSignatureLabel(gameNumber, 2), cards2),
+    StringEntry(getGameCardsSignatureLabel(gameNumber, 3), cards3)
+  ]
+}
+
+func getSuit(card: String) = {
+  card.split("/").getElement(1)
+}
+
+func getNumber(card: String) = {
+  value(parseInt(card.split("/").getElement(0)))
+}
+
+func isFourOfAKind(hand: List[Int]) = {
+  if(
+    hand.getElement(0) == hand.getElement(3) || 
+    hand.getElement(1) == hand.getElement(4)
+  ) then {
+    true
+  }
+  else
+  {
+    false
+  }
+}
+
+func isFullHouse(hand: List[Int]) = {
+  if(
+   (hand.getElement(0) == hand.getElement(2) && hand.getElement(3) == hand.getElement(4)) || 
+    (hand.getElement(0) == hand.getElement(1) && hand.getElement(2) == hand.getElement(4))
+  ) then {
+    true
+  }
+  else
+  {
+    false
+  }
+}
+
+func isFlush(hand: List[String]) = {
+  let firstSuit = hand.getElement(0)
+  if(
+    hand.getElement(1) == firstSuit &&
+    hand.getElement(2) == firstSuit &&
+    hand.getElement(3) == firstSuit &&
+    hand.getElement(4) == firstSuit
+  ) then {
+    true
+  }
+  else{
+    false
+  }
+}
+
+func isStraight(hand: List[Int]) = {
+  let largest = hand.getElement(4)
+  if(
+    hand.getElement(3) == largest - 1 &&
+    hand.getElement(2) == largest - 2 &&
+    hand.getElement(1) == largest - 3 &&
+    hand.getElement(0) == largest - 4
+  ) then {
+    true
+  }
+  else{
+    false
+  }
+}
+
+func isThreeOfKind(hand: List[Int]) = {
+  if(hand.getElement(0) == hand.getElement(2) ||
+    hand.getElement(1) == hand.getElement(3) ||
+    hand.getElement(2) == hand.getElement(4)
+  ) then {
+    true
+  }
+  else{
+    false
+  }
+}
+
+func isTwoPair(hand: List[Int]) = {
+  let numberOfPairs = 0
+  let matching = [
+    hand.getElement(0) == hand.getElement(1),
+    hand.getElement(1) == hand.getElement(2),
+    hand.getElement(2) == hand.getElement(3),
+    hand.getElement(3) == hand.getElement(4)
+  ]
+  # Both of them have an index and they are not they same
+  if(
+    matching.indexOf(true) != matching.lastIndexOf(true) &&
+    matching.indexOf(true) != unit &&
+    matching.lastIndexOf(true) != unit
+  ) then {
+    true
+  }
+  else
+  {
+    false
+  }
+}
+
+func isOnePair(hand: List[Int]) = {
+  if(hand.getElement(0) == hand.getElement(1) ||
+    hand.getElement(1) == hand.getElement(2) ||
+    hand.getElement(2) == hand.getElement(3) ||
+    hand.getElement(3) == hand.getElement(4)
+  ) then {
+    true
+  }
+  else{
+    false
+  }
+}
+
+# Make sure the hands are sorted
+func getScore(hand: List[String]) = {
+  let allNumbers = nil :+ getNumber(hand.getElement(0)) :+ getNumber(hand.getElement(1)) :+ getNumber(hand.getElement(2)) :+ getNumber(hand.getElement(3)) :+ getNumber(hand.getElement(4)) 
+  let allSuits = nil :+ getSuit(hand.getElement(0)) :+ getSuit(hand.getElement(1)) :+ getSuit(hand.getElement(2)) :+ getSuit(hand.getElement(3)) :+ getSuit(hand.getElement(4)) 
+  if(isStraight(allNumbers)) then {
+    if(isFlush(allSuits)) then {
+      if(allNumbers.getElement(4) == 14) then
+      {
+        9
+      }
+      else
+      {
+        8
+      }
+    }
+    else  
+    {
+      4
+    }
+  }
+  else if(isFourOfAKind(allNumbers)) then {
+    7
+  }
+  else if(isFullHouse(allNumbers)) then {
+    6
+  }
+  else if(isFlush(allSuits)) then {
+    5
+  }
+  else if(isThreeOfKind(allNumbers)) then {
+    3
+  }
+  else if(isTwoPair(allNumbers)) then {
+    2
+  }
+  else if(isOnePair(allNumbers)) then {
+    1
+  }
+  else
+  {
+    0
+  }
+}
+
+func payoutMultiplier(playerScore: Int) = {
+  if(playerScore == 9) then {
+    101
+  }
+  else if(playerScore == 8) then {
+    51
+  }
+  else if(playerScore == 7) then {
+    21
+  }
+  else if(playerScore == 6) then {
+    8
+  }
+  else if(playerScore == 5) then {
+    6
+  }
+  else if(playerScore == 4) then {
+    5
+  }
+  else if(playerScore == 3) then {
+    4
+  }
+  else if(playerScore == 2) then {
+    3
+  }
+  else {
+    2
+  }
+}
+
+# 0 - no one
+# 1 - player
+# 2 - dealer
+func whoHasHighestCard(allPlayerNumbers: List[Int], allDealerNumbers: List[Int]) = {
+  if(allDealerNumbers.getElement(4) > allPlayerNumbers.getElement(4)) then {
+    2
+  }
+  else if(allDealerNumbers.getElement(4) < allPlayerNumbers.getElement(4)) then {
+    1
+  }
+  else 
+  {
+    if(allDealerNumbers.getElement(3) > allPlayerNumbers.getElement(3)) then {
+      2
+    }
+    else if(allDealerNumbers.getElement(3) < allPlayerNumbers.getElement(3)) then {
+      1
+    }
+    else 
+    {
+        if(allDealerNumbers.getElement(2) > allPlayerNumbers.getElement(2)) then {
+          2
+        }
+        else if(allDealerNumbers.getElement(2) < allPlayerNumbers.getElement(2)) then {
+          1
+        }
+        else 
+        {
+          if(allDealerNumbers.getElement(1) > allPlayerNumbers.getElement(1)) then {
+            2
+          }
+          else if(allDealerNumbers.getElement(1) < allPlayerNumbers.getElement(1)) then {
+            1
+          }
+          else 
+          {
+            if(allDealerNumbers.getElement(0) > allPlayerNumbers.getElement(0)) then {
+              2
+            }
+            else if(allDealerNumbers.getElement(0) < allPlayerNumbers.getElement(0)) then {
+              1
+            }
+            else 
+            {
+              0
+            }
+          }
+        }
+    }
+  }
+}
+
+
+
+func highestPairNumber(cardNumbers: List[Int]) = {
+  if(cardNumbers.getElement(4) == cardNumbers.getElement(3)) then {
+    cardNumbers.getElement(4)
+  }
+  else if(cardNumbers.getElement(3)== cardNumbers.getElement(2)) then {
+    cardNumbers.getElement(3)
+  }
+  else if(cardNumbers.getElement(2)== cardNumbers.getElement(1)) then {
+    cardNumbers.getElement(2)
+  }
+  else if(cardNumbers.getElement(1) == cardNumbers.getElement(0)) then {
+    cardNumbers.getElement(1)
+  }
+  else
+  {
+    -1
+  }
+}
+
+func lowestPairNumber(cardNumbers: List[Int]) = {
+  if(cardNumbers.getElement(0) == cardNumbers.getElement(1)) then {
+    cardNumbers.getElement(1)
+  }
+  else if(cardNumbers.getElement(1)== cardNumbers.getElement(2)) then {
+    cardNumbers.getElement(1)
+  }
+  else if(cardNumbers.getElement(2)== cardNumbers.getElement(3)) then {
+    cardNumbers.getElement(2)
+  }
+  else if(cardNumbers.getElement(3)== cardNumbers.getElement(4)) then {
+    cardNumbers.getElement(3)
+  }
+  else
+  {
+    -1
+  }
+}
+
+func getHighestNonPairNumber(cardNumbers: List[Int]) = {
+  if(cardNumbers.getElement(4) != cardNumbers.getElement(3)) then {
+    cardNumbers.getElement(4)
+  }
+  else if(cardNumbers.getElement(2) != cardNumbers.getElement(1)) then {
+    cardNumbers.getElement(2)
+  }
+  else
+  {
+    cardNumbers.getElement(0)
+  }
+}
+
+func secondHighestNonPairOfPairHand(cardNumbers: List[Int]) = {
+  if(cardNumbers.getElement(3) == cardNumbers.getElement(2)) then {
+    cardNumbers.getElement(1)
+  }
+  else if(cardNumbers.getElement(2) == cardNumbers.getElement(1)) then {
+    cardNumbers.getElement(3)
+  }
+  else
+  {
+    cardNumbers.getElement(2)
+  }
+}
+
+func thirdHighestNonPairOfPairHand(cardNumbers: List[Int]) = {
+  if(cardNumbers.getElement(0) == cardNumbers.getElement(1)) then {
+    cardNumbers.getElement(2)
+  }
+  else
+  {
+    cardNumbers.getElement(0)
+  }
+}
+
+func getPlayerPayout(playerHand: String, dealerHand: String, ante: Int, playerScore: Int) =
+{
+  let playerCards = playerHand.split("+")
+  let playerValue = playerScore
+  let dealerCards = dealerHand.split("+")
+  let dealerValue = getScore(dealerCards)
+
+  let allPlayerNumbers = nil :+ getNumber(playerCards.getElement(0)) :+ getNumber(playerCards.getElement(1)) :+ getNumber(playerCards.getElement(2)) :+ getNumber(playerCards.getElement(3)) :+ getNumber(playerCards.getElement(4)) 
+  let allDealerNumbers = nil :+ getNumber(dealerCards.getElement(0)) :+ getNumber(dealerCards.getElement(1)) :+ getNumber(dealerCards.getElement(2)) :+ getNumber(dealerCards.getElement(3)) :+ getNumber(dealerCards.getElement(4)) 
+
+  if((dealerHand.indexOf("13") != unit && dealerHand.indexOf("14") != unit) || dealerValue >= 1) then {
+    if(playerValue == dealerValue) then {
+        if(playerValue == 9) then {
+          ante + ante * 2
+        }
+        else if(
+        playerValue == 8 || 
+        playerValue == 4
+        ) then {
+          if(allDealerNumbers.getElement(4) > allPlayerNumbers.getElement(4)) then {
+            0
+          }
+          else if(allDealerNumbers.getElement(4) == allPlayerNumbers.getElement(4)) then
+          {
+            ante + ante * 2
+          }
+          else
+          {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          }
+        }
+        else if(playerValue == 7) then {
+          if(allDealerNumbers.getElement(1) > allPlayerNumbers.getElement(1)) then {
+            0
+          }
+          else
+          {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          }
+        }
+        else if(playerValue == 6) then {
+          if(allDealerNumbers.getElement(2) > allPlayerNumbers.getElement(2)) then {
+            0
+          }
+          else
+          {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          }
+        }
+        else if(playerValue == 5) then {
+          let highestCardThere = whoHasHighestCard(allPlayerNumbers, allDealerNumbers)
+          if(highestCardThere == 1) then {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          } else if(highestCardThere == 2) then {
+            0
+          } else
+          {
+            ante + ante * 2
+          }
+        }
+        else if(playerValue == 3) then {
+          if(allDealerNumbers.getElement(2) > allPlayerNumbers.getElement(2)) then {
+            0
+          }
+          else
+          {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          }
+        }
+        else if(playerValue == 2 || playerValue == 1) then {
+          let playersHighestPair = highestPairNumber(allPlayerNumbers)
+          let dealersHighestPair = highestPairNumber(allDealerNumbers)
+          if(dealersHighestPair > playersHighestPair) then {
+            0
+          }
+          else if(dealersHighestPair < playersHighestPair) then
+          {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          }
+          else 
+          {
+            let dealersHighestNonPair = getHighestNonPairNumber(allDealerNumbers)
+            let playerssHighestNonPair = getHighestNonPairNumber(allPlayerNumbers)
+            if(playerValue == 2) then {
+              let playersLowestPair = lowestPairNumber(allPlayerNumbers)
+              let dealersLowestPair = lowestPairNumber(allDealerNumbers)
+              if(dealersLowestPair > playersLowestPair) then {
+                0
+              }
+              else if(playersLowestPair > dealersLowestPair) then {
+                payoutMultiplier(playerValue) * ante * 2 + ante * 2
+              }
+              else
+              {
+                if(dealersHighestNonPair > playerssHighestNonPair) then
+                {
+                  0
+                }
+                else if(playerssHighestNonPair > dealersHighestNonPair) then
+                {
+                  payoutMultiplier(playerValue) * ante * 2 + ante * 2
+                }
+                else {
+                  ante + ante * 2
+                }
+              }
+            }
+            else 
+            {
+              if(dealersHighestNonPair > playerssHighestNonPair) then
+              {
+                0
+              }
+              else if(playerssHighestNonPair > dealersHighestNonPair) then
+              {
+                payoutMultiplier(playerValue) * ante * 2 + ante * 2
+              }
+              else 
+                {
+                  let dealerssecondHighestNonPair = secondHighestNonPairOfPairHand(allDealerNumbers)
+                  let playerssecondHighestNonPair = secondHighestNonPairOfPairHand(allPlayerNumbers)
+                  if(dealerssecondHighestNonPair > playerssecondHighestNonPair) then
+                  {
+                    0
+                  }
+                  else if(playerssecondHighestNonPair > dealerssecondHighestNonPair) then
+                  {
+                    payoutMultiplier(playerValue) * ante * 2 + ante * 2
+                  }
+                  else
+                  {
+                    let dealersthirdHighestNonPair = thirdHighestNonPairOfPairHand(allDealerNumbers)
+                    let playersthirdHighestNonPair = thirdHighestNonPairOfPairHand(allPlayerNumbers)
+                     if(dealersthirdHighestNonPair > playersthirdHighestNonPair) then
+                    {
+                      0
+                    }
+                    else if(playersthirdHighestNonPair > dealersthirdHighestNonPair) then
+                    {
+                      payoutMultiplier(playerValue) * ante * 2 + ante * 2
+                    }
+                    else
+                    {
+                      ante + ante * 2
+                    }
+                  }
+                }
+            }
+          }
+        }
+        else
+        {
+          let highestCardThere = whoHasHighestCard(allPlayerNumbers, allDealerNumbers)
+          if(highestCardThere == 1) then {
+            payoutMultiplier(playerValue) * ante * 2 + ante * 2
+          } else if(highestCardThere == 2) then {
+            0
+          } else
+          {
+            ante + ante * 2
+          }
+        }
+    }
+    else if(playerValue > dealerValue) then
+    {
+      payoutMultiplier(playerValue) * ante * 2 + ante * 2
+    }
+    else
+    {
+      0
+    }
+  }
+  else 
+  {
+    ante * 4
+  }
+}
+
+@Callable(i)
+func testPairSingleCards(orderedCards: String) = {
+  let hand = orderedCards.split("+")
+  let allNumbers = nil :+ getNumber(hand.getElement(0)) :+ getNumber(hand.getElement(1)) :+ getNumber(hand.getElement(2)) :+ getNumber(hand.getElement(3)) :+ getNumber(hand.getElement(4)) 
+  throw(getHighestNonPairNumber(allNumbers).toString() + "-" + secondHighestNonPairOfPairHand(allNumbers).toString() + "-" + thirdHighestNonPairOfPairHand(allNumbers).toString())
+}
+
+@Callable(i)
+func testPayout(playerHand: String, dealerHand: String, ante: Int, playerScore: Int) = {
+  throw(getPlayerPayout(playerHand, dealerHand, ante, playerScore).toString())
+}
+
+@Callable(i)
+func initGame() = {
+if(checkPermission(i.callerPublicKey)) then throw("initGame_FORBBIDEN") else {
+        match gamesSetupGetCounter() {
+            case GAMESCOUNTER:Int => throw("INIT_ALREADY_DONE")
+            case _ => [
+                IntegerEntry(setupGamesCounterLabel, 0),
+                IntegerEntry(usedGamesCounterLabel, 0),
+                IntegerEntry(gameMaxBetLabel, 200000000),
+                StringEntry(dealerQueueLabel, "")
+            ]
+        }
+    }
+}
+
+@Callable(i)
+func testScore(orderedCards: String) = {
+  throw("Score is " + getScore(orderedCards.split("+")).toString() +".")
+}
+
+@Callable(i)
+func testHighestPair(orderedCards: String) = {
+  let hand = orderedCards.split("+")
+  let allNumbers = nil :+ getNumber(hand.getElement(0)) :+ getNumber(hand.getElement(1)) :+ getNumber(hand.getElement(2)) :+ getNumber(hand.getElement(3)) :+ getNumber(hand.getElement(4)) 
+  throw("Highest Pairs is " + highestPairNumber(allNumbers).toString() +".")
+}
+
+@Callable(i)
+func testLowestPair(orderedCards: String) = {
+  let hand = orderedCards.split("+")
+  let allNumbers = nil :+ getNumber(hand.getElement(0)) :+ getNumber(hand.getElement(1)) :+ getNumber(hand.getElement(2)) :+ getNumber(hand.getElement(3)) :+ getNumber(hand.getElement(4)) 
+  throw("Highest Pairs is " + lowestPairNumber(allNumbers).toString() +".")
+}
+
+@Callable(i)
+func revealResults(currentGame: Int, 
+  card3: String,
+  dealerOrderedCards: String) = 
+{
+  if(checkPermission(i.callerPublicKey)) then throw("setupGame_FORBBIDEN") else {
+      let dealerQueue = value(getDealerQueue())
+      let nextGameToProcess = dealerQueue.split(",").getElement(1)
+      if(nextGameToProcess == currentGame.toString()) then {
+        #let allDealerCards = value(getGameCards(currentGame, 2)) + card3
+        #let orderedCards = dealerOrderedCards.split("+")
+        #if(
+          #allDealerCards.indexOf(orderedCards.getElement(0)) != unit &&
+          #allDealerCards.indexOf(orderedCards.getElement(1)) != unit &&
+          #allDealerCards.indexOf(orderedCards.getElement(2)) != unit &&
+          #allDealerCards.indexOf(orderedCards.getElement(3)) != unit &&
+          #allDealerCards.indexOf(orderedCards.getElement(4)) != unit && 
+          #getNumber(orderedCards.getElement(0)) <= getNumber(orderedCards.getElement(1)) && 
+          #getNumber(orderedCards.getElement(1)) <= getNumber(orderedCards.getElement(2)) && 
+          #getNumber(orderedCards.getElement(2)) <= getNumber(orderedCards.getElement(3)) && 
+          #getNumber(orderedCards.getElement(3)) <= getNumber(orderedCards.getElement(4))
+          #) then {
+            if(verifyCard(card3, currentGame, 3)) then {
+              let ante = value(getGameAnteAmount(currentGame))
+              let address = value(addressFromString(value(getGamePlayer(currentGame))))
+              let playersOrderedCards = value(getGameSortedHandCards(currentGame, "PLAYER"))
+              let payout = getPlayerPayout(playersOrderedCards, dealerOrderedCards, ante, value(getGameHandScore(currentGame, "PLAYER")))
+              [
+                #StringEntry(getGameCardsLabel(currentGame, 3), card3),
+                IntegerEntry(getGameStateLabel(currentGame), 4),
+                StringEntry(dealerQueueLabel, dealerQueue.takeRight(dealerQueue.size() - (1 + currentGame.toString().size()))),
+                IntegerEntry(getGamePayoutLabel(currentGame), payout),
+                StringEntry(getGameSortedHandLabel(currentGame, "DEALER"), dealerOrderedCards),
+                ScriptTransfer(address, payout, unit)
+              ]
+            }
+            else
+            {
+              throw("One of the cards failed to be verified.")
+            }
+         #       }
+        #  else {
+        #    throw("Dealers cards need to be in order")
+        #  }
+      }
+      else
+      {
+        throw("The next game to process is " + nextGameToProcess)
+      }
+    #}
+  }
+}
+
+# Action can be fold or raise
+@Callable(i)
+func foldOrRaise(action: String) =
+{
+  # Check if expired
+  let address = toBase58String(i.caller.bytes)
+  if(action != "fold" && action != "raise") then {
+    throw("Invalid action.")
+  }
+  else
+  {
+    let currentGame = value(getPlayerCurrentGame(address))
+    if(value(getGameState(currentGame) != 2)) then throw("Game is not in correct state.")
+    else {
+      if(action == "raise") then {
+          let ante = value(getGameAnteAmount(currentGame))
+          let pay = i.payments[0].amount
+          if(size(i.payments) != 1 || pay != ante * 2) then
+          { 
+            throw("Payment must be 2x the ante (" + (ante * 2).toString() + ")")
+          }
+          else 
+          {
+            [
+              IntegerEntry(getGameStateLabel(currentGame) , 3),
+              StringEntry(dealerQueueLabel, value(getDealerQueue()) + "," + currentGame.toString())
+            ]
+          }
+        }
+        else {
+          [IntegerEntry(getGameStateLabel(currentGame) , 6)]
+        }
+      }
+  }
+}
+
+# Currently we are not testing whether cards are in order
+@Callable(i)
+func revealCards(
+  currentGame: Int,
+  card0: String,
+  card1: String,
+  card2: String,
+  playerOrderedCards: String
+) = {
+  if(checkPermission(i.callerPublicKey)) then throw("setupGame_FORBBIDEN") else {
+      let dealerQueue = value(getDealerQueue())
+      let nextGameToProcess = dealerQueue.split(",").getElement(1)
+      if(nextGameToProcess == currentGame.toString()) then {
+        let allPlayersCards = card0 + card1
+        let orderedCards = playerOrderedCards.split("+")
+        if(
+          true
+          #allPlayersCards.indexOf(orderedCards.getElement(0)) != unit &&
+          #allPlayersCards.indexOf(orderedCards.getElement(1)) != unit &&
+          #allPlayersCards.indexOf(orderedCards.getElement(2)) != unit &&
+          #allPlayersCards.indexOf(orderedCards.getElement(3)) != unit &&
+          #allPlayersCards.indexOf(orderedCards.getElement(4)) != unit #&& 
+          #getNumber(orderedCards.getElement(0)) <= getNumber(orderedCards.getElement(1)) && 
+          #getNumber(orderedCards.getElement(1)) <= getNumber(orderedCards.getElement(2)) && 
+          #getNumber(orderedCards.getElement(2)) <= getNumber(orderedCards.getElement(3)) && 
+          #getNumber(orderedCards.getElement(3)) <= getNumber(orderedCards.getElement(4))
+          ) then {
+          if(
+            value(getGameState(currentGame)) == 1 &&
+            verifyCard(card0, currentGame, 0) && 
+            verifyCard(card1, currentGame, 1) &&
+            verifyCard(card2, currentGame, 2)
+          ) then {
+            [
+              #StringEntry(getGameCardsLabel(currentGame, 0), card0),
+              #StringEntry(getGameCardsLabel(currentGame, 1), card1),
+              StringEntry(getGameCardsLabel(currentGame, 2), card2),
+              IntegerEntry(value(getGameStateLabel(currentGame)), 2),
+              StringEntry(dealerQueueLabel, dealerQueue.takeRight(dealerQueue.size() - (1 + currentGame.toString().size()))),
+              StringEntry(getGameSortedHandLabel(currentGame, "PLAYER"), playerOrderedCards),
+              IntegerEntry(getGameHandScoreLabel(currentGame, "PLAYER"), getScore(orderedCards))
+            ]
+          }
+          else
+          {
+            throw("One of the cards failed to be verified or game is not in state 1.")
+          }
+        }
+        else 
+        {
+          throw("Ordered cards should be sorted from smallest to largest.")
+        }
+      }
+      else
+      {
+        throw("The next game to process is " + nextGameToProcess)
+      }
+  #  }
+  }
+}
+
+@Callable(i)
+func startGame() = {
+  if(size(i.payments) != 1) then
+  { 
+    throw("Only one mayment allowed")
+  }
+  else 
+  {
+    let p = i.payments[0]
+    let ante = p.amount
+    let address = toBase58String(i.caller.bytes)
+    if ((ante > value(gamesMaxBet())))
+      then throw("Max bet exceeded")
+    else {
+      if(value(gamesSetupGetCounter()) <= value(gamesUsedGetCounter())) then
+      {
+        throw("No available set up games to use.")
+      }
+      else
+      {
+        match getPlayerCurrentGame(address) {
+          case CURRENTGAME: Int => {
+            if(value(getGameState(CURRENTGAME)) < 4) then {
+              throw("Game " + toString(CURRENTGAME) + " is still in progress.")
+            }
+            else
+            {
+              createGameMetadata(address, ante)
+            }
+          }
+          case _:Unit => {
+              createGameMetadata(address, ante)
+          }
+        }
+      }
+    }
+  }
+}
+
+@Callable(i)
+func setupGame(gameNumber: Int, cards0: String, cards1: String, cards2: String, cards3: String) = {
+  if(checkPermission(i.callerPublicKey)) then throw("setupGame_FORBBIDEN") else {
+        match gamesSetupGetCounter() {
+            case SETUPGAMESCOUNTER:Int => {
+              let randomizer =  toInt(sha256(lastBlock.generationSignature.take(16) + i.transactionId.take(16)))%2
+              let currentGame = SETUPGAMESCOUNTER + 1
+              if(gameNumber != currentGame) then throw("Wrong game number.") else {
+                if(randomizer % 2 == 1) then 
+                {
+                  getGameSetup(currentGame, randomizer, cards3,cards2,cards1,cards0)
+                }
+                else
+                {
+                  getGameSetup(currentGame, randomizer, cards0, cards1, cards2, cards3)
+                }
+              }
+            }
+            case _ => throw("InitGame Required")
+        }
+  }
+}
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)

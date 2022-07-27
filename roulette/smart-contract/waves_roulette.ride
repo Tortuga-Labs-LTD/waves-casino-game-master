@@ -1,0 +1,593 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+#https://8gwifi.org/rsasignverifyfunctions.jsp
+
+# Global Variables
+let wheel = [5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26,0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10]
+let black =  [2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35]
+let red =  [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]
+let col1 = [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34]
+let col2 = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35]
+let col3 = [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36]
+
+#Global constants
+let gameMasterPublicKey = fromBase58String("<game-master-public-key>")
+
+# Labels
+let gameCounterLabel = "G_GAMESCOUNTER"
+let gameTotalBetsLabel = "G_TOTALBETS"
+let gameProcessedBetsLabel = "G_PROCESSEDBETS"
+let gameMinBetLabel = "G_MINBET"
+let gameMaxBetLabel = "G_MAXBET"
+let gameRSAPublicLabel = "G_RSAPUBLIC"
+let gameMasterPublicKeyLabel = "G_GAMEMASTER_PUBLIC_KEY"
+let gameTokenLabel = "G_TOKENID"
+
+# Global Variables
+func gamesGetCounter() = getInteger(this, gameCounterLabel)
+func gamesTotalBets() = getInteger(this, gameTotalBetsLabel)
+func gamesProcessedBets() = getInteger(this, gameProcessedBetsLabel)
+func gamesMinBet() = getIntegerValue(this, gameMinBetLabel)
+func gamesMaxBet() = getIntegerValue(this, gameMaxBetLabel)
+func gameRSAPublicString() = getStringValue(this, gameRSAPublicLabel)
+func gameRSAPublic() = fromBase64String(gameRSAPublicString())
+func gameToken() = {
+  match getString(this, gameTokenLabel) {
+    case tokenId: String => {
+      if (tokenId == "") then {
+        unit
+      }else{
+        fromBase58String(tokenId)
+      }
+    }
+    case _ =>{
+      unit
+    }
+  }
+}
+
+# Bet Label
+func betDetailsLabel(betNumber: Int) = ("B_" + toString(betNumber) + "_BETDETAILS")
+func betWinStateLabel(betNumber: Int) = ("B_" + toString(betNumber) + "_WINSTATE")
+func betWinAmountLabel(betNumber: Int) = ("B_" + toString(betNumber) + "_WINAMOUNT")
+func betGameLabel(betNumber: Int) = ("B_" + toString(betNumber) + "_GAME")
+func betPayoutLabel(betNumber: Int) = ("B_" + toString(betNumber) + "_PAYOUT")
+
+# Bet Specific Variables
+func betDetailsResult(betNumber: Int) = getStringValue(this, betDetailsLabel(betNumber))
+func betGameResult(betNumber: Int) = getIntegerValue(this, betGameLabel(betNumber))
+
+# Game labels
+func gameStateLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_STATE")
+func gameStartHeightLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_STARTHEIGHT")
+func gameEndHeightLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_ENDHEIGHT")
+func gameSumShaLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_SUMSHA")
+func gameResultLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_RESULT")
+func gameRandomHashLabel(gameNumber:Int) = ("G_" + toString(gameNumber) + "_RANDOMHASH")
+
+# Game specific Variables
+func gameGetState(gameNumber:Int) = getInteger(this, gameStateLabel(gameNumber)) # 0 = open, 1 = finished
+func gameGetEndHeight(gameNumber:Int) = getInteger(this, gameEndHeightLabel(gameNumber))
+func gameGetSumSha(gameNumber:Int) = getString(this, gameSumShaLabel(gameNumber))
+func gameGetResult(gameNumber:Int) = getIntegerValue(this, gameResultLabel(gameNumber))
+
+# Game Master Check
+func checkPermission(callerPublicKey:ByteVector) = callerPublicKey != gameMasterPublicKey
+func gameInBaseToken(token: String|Unit) = token == unit
+
+
+# Calculate how much of the game you have won
+func getMultiple(numberPlaced: Int) = {
+  if(numberPlaced == 1) then {
+    36
+  }
+  else
+  {
+    if(numberPlaced == 2) then {
+        18
+    }
+    else
+    {
+      if(numberPlaced == 3) then {
+        12
+      }
+      else
+      {
+        if(numberPlaced == 4) then {
+          9
+        }
+        else
+        {
+            if(numberPlaced == 5) then {
+              7
+            }
+            else
+            {
+              if(numberPlaced == 6) then {
+                6
+              }
+              else
+              {
+                0
+              }
+            }
+        }
+      }
+    }
+  }
+}
+
+func getWinnings(bet: String, result: Int) = {
+  let betStringList = bet.split("-")
+  let amountBet = value(parseInt(betStringList.getElement(1)))
+  let betType = betStringList.getElement(2)
+  if(betType == "numbers") then
+  {
+    let allNumberBets = betStringList.removeByIndex(0).removeByIndex(0).removeByIndex(0)
+    if(allNumberBets.containsElement(result.toString())) then
+    {
+      amountBet * getMultiple(allNumberBets.size())
+    }
+    else
+    {
+      0
+    }
+  }
+  else
+  {
+    if(betType == "color") then {
+      if(betStringList.getElement(3) == "red") then {
+        if(red.containsElement(result)) then
+        {
+          amountBet * 2
+        }
+        else
+        {
+          0
+        }
+      }
+      else
+      {
+        if(black.containsElement(result)) then
+        {
+           amountBet * 2
+        }
+        else
+        {
+          0
+        }
+      }
+    }
+    else{
+      if(betType == "column") then {
+         if(betStringList.getElement(3) == "1") then {
+           if(col1.containsElement(result))  then
+           {
+             amountBet * 3
+           }
+           else
+           {
+              0
+           }
+         }
+         else
+         {
+           if(betStringList.getElement(3) == "2") then {
+              if(col2.containsElement(result))  then
+              {
+                amountBet * 3
+              }
+              else
+              {
+                 0
+              }
+            }
+            else
+            {
+              if(betStringList.getElement(3) == "3")  then {
+                  if(col3.containsElement(result))  then
+                  {
+                    amountBet * 3
+                  }
+                  else
+                  {
+                    0
+                  }
+              }
+              else
+              {
+                 0
+              }
+            }
+         }
+      }
+      else {
+        if(betType == "dozen") then {
+          if(betStringList.getElement(3) == "1") then {
+            if(result >= 1 && result <= 12) then
+            {
+              amountBet * 3
+            }
+            else
+            {
+             0
+            }
+          }
+          else
+          {
+             if(betStringList.getElement(3) == "2") then {
+                if(result >= 13 && result <= 24) then
+                {
+                 amountBet * 3
+                }
+                else
+                {
+                  0
+                }
+              }
+              else
+              {
+                if(betStringList.getElement(3) == "3") then {
+                  if(result >= 25 && result <= 36) then
+                  {
+                   amountBet * 3
+                  }
+                  else
+                  {
+                   0
+                  }
+                }
+                else
+                {
+                   0
+                }
+              }
+          }
+        }
+        else {
+          if(betType == "oddeven") then {
+             if(result == 0) then {
+                0
+             }
+             else {
+                if(betStringList.getElement(3) == "even")  then{
+                  if(result % 2 == 0 && result != 0) then
+                  {
+                    amountBet * 2
+                  }
+                  else
+                  {
+                      0
+                  }
+                }
+                else
+                {
+                  if(result % 2 == 1) then
+                  {
+                    amountBet * 2
+                  }
+                  else
+                  {
+                     0
+                  }
+                }
+             }
+          }
+          else {
+            if(betType == "lowhigh")  then {
+              if(result == 0) then {
+               0
+             }
+             else {
+                if(betStringList.getElement(3) == "low") then {
+                  if(result >= 1 && result <= 18) then
+                  {
+                     amountBet * 2
+                  }
+                  else
+                  {
+                     0
+                  }
+                }
+                else
+                {
+                  if(result >= 19 && result <= 36) then
+                  {
+                     amountBet * 2
+                  }
+                  else
+                  {
+                     0
+                  }
+                }
+             }
+            }
+            else 
+            {
+              0
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Callable(i)
+func processNextBet() = {
+  if(checkPermission(i.callerPublicKey)) then throw("processNextBet_FORBBIDEN") else {
+    match gamesTotalBets() {
+      case totalBets: Int => {
+        match gamesProcessedBets() {
+          case lastProcessedBet: Int => {
+              let nextBet = lastProcessedBet + 1
+              if(nextBet > totalBets) then
+              {
+                throw("Next bet has not been placed.")
+              }
+              else
+              {
+                  let gameNumber = betGameResult(nextBet)
+                  match gameGetState(gameNumber) {
+                    case state:Int => {
+                      if(state == 1) then
+                      {
+                        let result = gameGetResult(gameNumber)
+                        let betDetails = betDetailsResult(nextBet)
+                        let betPlacer = betDetails.split("-").getElement(0)
+                        let address = value(addressFromString(betPlacer))
+                        let winnings = getWinnings(betDetails, result)
+                        [
+                          ScriptTransfer(address, winnings, gameToken()),
+                          IntegerEntry(gameProcessedBetsLabel, lastProcessedBet + 1),
+                          IntegerEntry(betPayoutLabel(nextBet), winnings)
+                        ]
+                      }
+                      else
+                      {
+                        throw("Game has not finished.")
+                      }
+                    }
+                    case _ => throw("Game does not exist or has already ended.")
+                }
+              }
+          }
+          case _ => throw("Game has not been initialized, next bets not found")
+        }
+      }
+      case _ => throw("Game has not been initialized, total bets not found")
+    }
+  }
+}
+
+
+@Callable(i)
+func initGame() = {
+  if(checkPermission(i.callerPublicKey)) then throw("initGame_FORBBIDEN") else {
+    match gamesGetCounter() {
+      case GAMESCOUNTER:Int => throw("INIT_ALREADY_DONE")
+      case _ => 
+        [
+          IntegerEntry(gameCounterLabel, 0),
+          IntegerEntry(gameTotalBetsLabel, 0),
+          IntegerEntry(gameProcessedBetsLabel, 0),
+          IntegerEntry(gameMinBetLabel,  100000000),
+          IntegerEntry(gameMaxBetLabel, 2500000000),
+          StringEntry(gameRSAPublicLabel, "base64:<gameRSAPublicLabel>"),
+          # empty for default network token
+          StringEntry(gameTokenLabel, "")
+        ]
+    }
+  }
+}
+
+
+# Use some base 64 string
+@Callable(i)
+func startGame(randomHash: String, blockInRound: Int) = {
+  if(checkPermission(i.callerPublicKey)) then throw("startGame_FORBBIDEN") else {
+      match gamesGetCounter() {
+        case GAMESCOUNTER:Int => {
+          let newGameCounter = GAMESCOUNTER + 1
+          if(GAMESCOUNTER > 0) then {
+            match gameGetState(GAMESCOUNTER) {
+              case gameState: Int => {
+                if(gameState == 0) then throw("Last game has not finished yet.") else {
+                  [
+                    IntegerEntry(gameCounterLabel, newGameCounter), # Update the game number
+                    IntegerEntry(gameStartHeightLabel(newGameCounter), lastBlock.height),
+                    IntegerEntry(gameEndHeightLabel(newGameCounter), height + blockInRound),
+                    IntegerEntry(gameStateLabel(newGameCounter), 0),
+                    StringEntry(gameSumShaLabel(newGameCounter), toBase58String(sha256(fromBase64String(randomHash))))
+                  ]
+                }
+              } 
+              case _ => throw("Game state not found.")
+            }
+          }
+          else {
+            [
+              IntegerEntry(gameCounterLabel, newGameCounter), # Update the game number
+              IntegerEntry(gameStartHeightLabel(newGameCounter), lastBlock.height),
+              IntegerEntry(gameEndHeightLabel(newGameCounter), height + blockInRound),
+              IntegerEntry(gameStateLabel(newGameCounter), 0),
+              StringEntry(gameSumShaLabel(newGameCounter), toBase58String(sha256(fromBase64String(randomHash))))
+            ]
+          }
+        }
+        case _ => throw("INIT_NEEDED")
+      }
+  }
+}
+
+@Callable(i)
+func placeBet(bet: String) = {
+  let assetId = gameToken()
+  if(i.feeAssetId != assetId) then
+  { 
+    throw("Fee is not in correct assetId")
+  }
+  else 
+  {
+    let betStringList = bet.split("-")
+    let betType = betStringList.getElement(0)
+    if(betType != "numbers" &&
+    betType != "column" && 
+    betType != "color" && 
+    betType != "dozen" && 
+    betType != "oddeven" && 
+    betType != "lowhigh" 
+    ) then {
+        throw("Bet type is not valid.")
+    }
+      else  {
+      match gamesGetCounter() {
+        case GAMESCOUNTER:Int => {
+          match gameGetState(GAMESCOUNTER) {
+            case state:Int => {
+                if(state == 1) then throw("Game is finished and next game has not started.") else {
+                  if (size(i.payments) != 1) then {
+                    throw("Payment not attached or there is more then one payment")
+                  } else {
+                    let p = i.payments[0]
+                    let amount = p.amount
+                    if(amount <= value(gamesMaxBet()) && amount >= value(gamesMinBet()) && i.payments[0].assetId == assetId) then
+                    {
+                      match gameGetEndHeight(GAMESCOUNTER) {
+                        case endHeight: Int => {
+                          if(endHeight > height) then
+                          {
+                            match gamesTotalBets() {
+                              case totalBets: Int => {
+                                let thisBetNumber = totalBets + 1
+                                if (assetId == unit) then {
+                                   [
+                                    IntegerEntry(gameTotalBetsLabel, totalBets + 1),
+                                    StringEntry(betDetailsLabel(thisBetNumber), toBase58String(i.caller.bytes) + "-" + toString(amount) + "-" + bet),
+                                    IntegerEntry(betGameLabel(thisBetNumber), GAMESCOUNTER)
+                                    ] 
+                                }else{
+                                    [
+                                    IntegerEntry(gameTotalBetsLabel, totalBets + 1),
+                                    StringEntry(betDetailsLabel(thisBetNumber), toBase58String(i.caller.bytes) + "-" + toString(amount) + "-" + bet),
+                                    IntegerEntry(betGameLabel(thisBetNumber), GAMESCOUNTER)
+                                    ]
+                                }
+                              }
+                            case _ => throw("Game has not been initalized.")
+                          }
+                        } else {
+                          throw("Game has already exceeded betting round")
+                        }
+                        }
+                        case _ => throw("End height has not been defined.")
+                      }
+                    }
+                    else  {
+                      throw("Bet ("+  toString(amount) +") is greater than maximum bet ("+  toString(gamesMaxBet()) +"), lower than minimum ("+ toString(gamesMinBet())+") or payment is not in correct assetId.")
+                    }
+                }
+              }
+            }
+            case _ => throw("Game does not exist or has already ended.")
+          }
+        }
+        case _ => throw("Game needs to be initialized.")
+      }
+    }
+  }
+}
+
+@Callable(i)
+func endGame(rsaSign:String, gameNumber: Int) = {
+  if(checkPermission(i.callerPublicKey)) then throw("endGame_FORBBIDEN") else {
+    match gameGetState(gameNumber) {
+      case state:Int => {
+          if(state == 1) then throw("Game is finished") else {
+            match(gameGetEndHeight(gameNumber)) {
+              case gameHeight: Int => {
+                # Minimum of two blocks must past
+              if(height < gameHeight) then throw("Not enough blocks have past since game has started, game ends at block " + gameHeight.toString()) else {
+                  match (gameGetSumSha(gameNumber)) {
+                      case SUMSHA:String => {
+                        let sig = fromBase64String(rsaSign)
+                        let rsaSigValid = rsaVerify(SHA256, fromBase58String(SUMSHA), sig, gameRSAPublic())
+                        match blockInfoByHeight(gameHeight) {
+                          case previousBlock: BlockInfo => {
+                            let randomHash = sha256(sig.take(32) + previousBlock.generationSignature.take(32))
+                            if(!rsaSigValid) then throw("INVALID_RSA_SIGN") else {
+                              let index =  wheel[(toInt(randomHash)+value(gameNumber)) % 37]
+                              [
+                                IntegerEntry(gameStateLabel(gameNumber), 1),
+                                IntegerEntry(gameResultLabel(gameNumber), index),
+                                StringEntry(gameRandomHashLabel(gameNumber), toBase64String(randomHash))
+                              ]
+                            }
+                          }
+                          case _ => throw("Last block does not exist.")
+                        }
+                      }
+                      case _ => throw("SHA does not exist")
+                  }
+                }
+              }
+              case _ => throw("Cannot get game height.")
+          }
+      }
+      }
+      case _ => throw("Game does not exist or has already ended")
+    }
+  }
+}
+
+
+@Callable(i)
+func setParameter(parameterName: String, parameterValue: String) = {
+  if(checkPermission(i.callerPublicKey)) then throw("setParameter_FORBBIDEN") else {
+    if (parameterName == "changeMax") then {
+      let maximumValue = parseIntValue(parameterValue)
+      let minimumValue = gamesMinBet()
+      if(maximumValue < 0) then {
+          throw("value cannot be lower than 0")
+      }else if (minimumValue >= maximumValue) then {
+          throw("value cannot be lower or equal than min bet (" + toString(minimumValue) + ")")
+      }
+      else{
+          [IntegerEntry(gameMaxBetLabel, maximumValue)]
+      }        
+    }else if (parameterName == "changeMin") then {
+      let maximumValue = gamesMaxBet()
+      let minimumValue = parseIntValue(parameterValue)
+      if(minimumValue < 0) then {
+          throw("value cannot be lower than 0")
+      }else if (minimumValue >= maximumValue) then {
+          throw("value cannot be greater or equal than min bet (" + toString(maximumValue) + ")")
+      }
+      else{
+          [IntegerEntry(gameMinBetLabel, minimumValue)]
+      }
+    }else if (parameterName == "changeRSA") then {
+      match gamesGetCounter() {
+        case GAMESCOUNTER:Int => {
+          match gameGetState(GAMESCOUNTER) {
+            case state:Int => {
+                if(state != 1) then { throw("Game has to be finished.") } else {
+                  [StringEntry(gameRSAPublicLabel, parameterValue)]
+                }
+            }
+            case _ => [StringEntry(gameRSAPublicLabel, parameterValue)]
+          }
+        }
+        case _ => throw("Game needs to be initialized.")
+      }
+    }else{
+        throw("Setting not found. Allowed: changeMax, changeMin, changeRSA, changePubKey")
+    }
+  }
+}
+
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
